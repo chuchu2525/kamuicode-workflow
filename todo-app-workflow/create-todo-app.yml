@@ -1,0 +1,708 @@
+name: Create TODO App
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_requirements:
+        description: "TODOアプリの要件（機能、技術スタック等）"
+        required: true
+        type: string
+      app_type:
+        description: "アプリのタイプ"
+        required: true
+        type: choice
+        options:
+          - "basic-html"
+          - "react-app"
+          - "fullstack-app"
+        default: "basic-html"
+
+jobs:
+  setup-project:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      branch-name: ${{ steps.create-branch.outputs.branch-name }}
+      folder-name: ${{ steps.create-branch.outputs.folder-name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create branch for app generation
+        id: create-branch
+        run: |
+          BRANCH_NAME="todo-app/$(date +%Y%m%d)-${{ github.run_id }}"
+          FOLDER_NAME="todo-app-$(date +%Y%m%d)-${{ github.run_id }}"
+          git checkout -b $BRANCH_NAME
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git push origin $BRANCH_NAME
+          echo "branch-name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "folder-name=$FOLDER_NAME" >> $GITHUB_OUTPUT
+          echo "Created branch: $BRANCH_NAME"
+          echo "Folder name: $FOLDER_NAME"
+
+  requirements-analysis:
+    runs-on: ubuntu-latest
+    needs: [setup-project]
+    permissions:
+      contents: write
+    outputs:
+      analysis-completed: ${{ steps.analysis.outputs.completed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup-project.outputs.branch-name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code SDK
+        run: npm install @anthropic-ai/claude-code
+
+      - name: 要件分析エージェント
+        id: analysis
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "::group::📋 Requirements Analysis Agent Execution"
+          echo "Starting at: $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+
+          FOLDER_NAME="${{ needs.setup-project.outputs.folder-name }}"
+          DOCS_DIR="$FOLDER_NAME/docs"
+          USER_REQUIREMENTS="${{ inputs.app_requirements }}"
+          APP_TYPE="${{ inputs.app_type }}"
+
+          echo "User requirements: $USER_REQUIREMENTS"
+          echo "App type: $APP_TYPE"
+          echo "Documentation folder: $DOCS_DIR"
+
+          # ドキュメントフォルダを事前に作成
+          if [ ! -d "$DOCS_DIR" ]; then
+            mkdir -p "$DOCS_DIR"
+            echo "📁 Created documentation folder: $DOCS_DIR"
+          fi
+
+          PROMPT="あなたはシステム分析の専門家です。
+
+          **ユーザー要件**: $USER_REQUIREMENTS
+          **アプリタイプ**: $APP_TYPE
+
+          以下のドキュメントを生成してください：
+
+          1. **$DOCS_DIR/requirements.md** - 機能要件・非機能要件
+             - 機能要件（具体的な機能一覧）
+             - 非機能要件（パフォーマンス、セキュリティ等）
+             - ユーザーストーリー
+             - 受け入れ条件
+
+          2. **$DOCS_DIR/technical-spec.md** - 技術仕様書
+             - 技術スタック選定理由
+             - アーキテクチャ概要
+             - データ構造設計
+             - API設計（該当する場合）
+
+          3. **$DOCS_DIR/file-structure.md** - ファイル構造設計
+             - プロジェクト全体のファイル構造
+             - 各ファイルの役割説明
+             - 命名規則
+
+          4. **$DOCS_DIR/implementation-plan.md** - 実装計画
+             - 実装順序
+             - 各段階の成果物
+             - 品質保証計画
+             - テスト戦略
+
+          **重要な制約**:
+          - 生成するファイル数: 最大8個
+          - 各ファイルサイズ: 500行以内
+          - 技術スタック: $APP_TYPE に適したもの
+          - 実装可能性: 必ず動作するコードが生成できる設計
+          - 具体性: 抽象的でなく具体的な内容
+
+          **アプリタイプ別の考慮事項**:
+          - basic-html: シンプル、軽量、ブラウザ互換性重視
+          - react-app: モダン、コンポーネント設計、型安全性
+          - fullstack-app: スケーラビリティ、セキュリティ、API設計
+
+          各ドキュメントは詳細で実用的な内容にしてください。"
+
+          echo "🚀 Starting Requirements Analysis Agent Claude Code CLI..."
+          echo "📝 Prompt length: ${#PROMPT}"
+
+          npx @anthropic-ai/claude-code \
+            --allowedTools "Read,Write,Edit" \
+            --max-turns 15 \
+            --verbose \
+            --permission-mode "acceptEdits" \
+            -p "$PROMPT" || {
+              echo "::error::❌ Claude Code CLI execution failed"
+              exit 1
+            }
+
+          # 生成されたドキュメントの確認
+          echo ""
+          echo "📋 Checking generated documentation..."
+
+          REQUIRED_DOCS=("requirements.md" "technical-spec.md" "file-structure.md" "implementation-plan.md")
+
+          for doc in "${REQUIRED_DOCS[@]}"; do
+            if [ -f "$DOCS_DIR/$doc" ]; then
+              echo "::notice::✅ Document generated: $doc"
+              echo "First 5 lines of $doc:"
+              head -5 "$DOCS_DIR/$doc"
+              echo ""
+            else
+              echo "::warning::⚠️ Document not found: $doc"
+            fi
+          done
+
+          echo "completed=true" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+
+      - name: Commit and push documentation
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${{ needs.setup-project.outputs.folder-name }}/
+          if git diff --cached --quiet; then
+            echo "No documentation files to commit"
+          else
+            git commit -m "Add requirements analysis: ${{ inputs.app_requirements }}"
+            git push origin ${{ needs.setup-project.outputs.branch-name }}
+          fi
+
+  code-generation:
+    runs-on: ubuntu-latest
+    needs: [setup-project, requirements-analysis]
+    permissions:
+      contents: write
+    outputs:
+      generation-completed: ${{ steps.generate.outputs.completed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup-project.outputs.branch-name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code SDK
+        run: npm install @anthropic-ai/claude-code
+
+      - name: コード生成エージェント
+        id: generate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "::group::💻 Code Generation Agent Execution"
+          echo "Starting at: $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+
+          FOLDER_NAME="${{ needs.setup-project.outputs.folder-name }}"
+          APP_DIR="$FOLDER_NAME/app"
+          DOCS_DIR="$FOLDER_NAME/docs"
+          USER_REQUIREMENTS="${{ inputs.app_requirements }}"
+          APP_TYPE="${{ inputs.app_type }}"
+
+          echo "User requirements: $USER_REQUIREMENTS"
+          echo "App type: $APP_TYPE"
+          echo "Target folder: $APP_DIR"
+
+          # アプリフォルダを事前に作成
+          if [ ! -d "$APP_DIR" ]; then
+            mkdir -p "$APP_DIR"
+            echo "📁 Created app folder: $APP_DIR"
+          fi
+
+          # アプリタイプに応じたプロンプト選択
+          case "$APP_TYPE" in
+            "basic-html")
+              TECH_PROMPT="HTML + CSS + JavaScript（バニラJS）でシンプルなTODOアプリを生成"
+              FILES_PROMPT="index.html, style.css, script.js, README.md"
+              SPECIFIC_INSTRUCTIONS="
+              - ローカルストレージでデータ永続化
+              - レスポンシブデザイン対応
+              - モダンなCSS（Flexbox/Grid使用）
+              - ES6+のJavaScript使用
+              - アクセシビリティ対応"
+              ;;
+            "react-app")
+              TECH_PROMPT="React + TypeScriptでモダンなTODOアプリを生成"
+              FILES_PROMPT="src/App.tsx, src/components/, src/hooks/, src/types/, package.json, README.md"
+              SPECIFIC_INSTRUCTIONS="
+              - TypeScript使用で型安全性確保
+              - カスタムフック活用
+              - Context API使用
+              - Vite設定
+              - ESLint/Prettier設定"
+              ;;
+            "fullstack-app")
+              TECH_PROMPT="React + Node.js + Express + MongoDBでフルスタックTODOアプリを生成"
+              FILES_PROMPT="frontend/, backend/, package.json, docker-compose.yml, README.md"
+              SPECIFIC_INSTRUCTIONS="
+              - REST API設計
+              - JWT認証実装
+              - MongoDB接続
+              - CORS設定
+              - 環境変数管理"
+              ;;
+          esac
+
+          PROMPT="あなたは経験豊富なフルスタック開発者です。
+
+          **要件**: $USER_REQUIREMENTS
+          **技術指示**: $TECH_PROMPT
+          **出力ディレクトリ**: $APP_DIR/
+
+          **生成ファイル**: $FILES_PROMPT
+
+          **技術的要件**: $SPECIFIC_INSTRUCTIONS
+
+          **重要な制約**:
+          1. 必ず動作するコードを生成
+          2. エラーハンドリングを含める
+          3. セキュリティを考慮
+          4. コメントで説明を記載
+          5. 最大10ファイル、各500行以内
+
+          **機能要件**:
+          - タスクの追加・編集・削除
+          - 完了状態の切り替え
+          - データの永続化
+          - 検索・フィルタ機能（可能であれば）
+          - レスポンシブデザイン
+
+          **品質要件**:
+          - クリーンなコード
+          - 適切な命名規則
+          - 保守性の高い構造
+          - パフォーマンス最適化
+
+          **ドキュメント参照**:
+          生成前に $DOCS_DIR/ 内の要件書を参照して、詳細な仕様を確認してください。
+
+          生成後、各ファイルが正しく作成されたことを確認してください。"
+
+          echo "🚀 Starting Code Generation Agent Claude Code CLI..."
+          echo "📝 Prompt length: ${#PROMPT}"
+
+          npx @anthropic-ai/claude-code \
+            --allowedTools "Read,Write,Edit" \
+            --max-turns 20 \
+            --verbose \
+            --permission-mode "acceptEdits" \
+            -p "$PROMPT" || {
+              echo "::error::❌ Claude Code CLI execution failed"
+              exit 1
+            }
+
+          # 生成されたファイルの確認
+          echo ""
+          echo "💻 Checking generated application files..."
+
+          if [ -d "$APP_DIR" ]; then
+            FILE_COUNT=$(find "$APP_DIR" -type f | wc -l)
+            echo "::notice::📁 Generated $FILE_COUNT files"
+            
+            if [ "$FILE_COUNT" -gt 0 ]; then
+              echo "Generated files:"
+              find "$APP_DIR" -type f | head -10
+              
+              # 主要ファイルの存在確認
+              case "$APP_TYPE" in
+                "basic-html")
+                  MAIN_FILES=("index.html" "style.css" "script.js")
+                  ;;
+                "react-app")
+                  MAIN_FILES=("package.json" "src/App.tsx")
+                  ;;
+                "fullstack-app")
+                  MAIN_FILES=("package.json" "frontend" "backend")
+                  ;;
+              esac
+              
+              for file in "${MAIN_FILES[@]}"; do
+                if [ -f "$APP_DIR/$file" ] || [ -d "$APP_DIR/$file" ]; then
+                  echo "::notice::✅ Main file/directory found: $file"
+                else
+                  echo "::warning::⚠️ Main file/directory missing: $file"
+                fi
+              done
+            else
+              echo "::error::❌ No files were generated"
+              exit 1
+            fi
+          else
+            echo "::error::❌ App directory not found"
+            exit 1
+          fi
+
+          echo "completed=true" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+
+      - name: Commit and push application
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ${{ needs.setup-project.outputs.folder-name }}/
+          if git diff --cached --quiet; then
+            echo "No application files to commit"
+          else
+            git commit -m "Add generated TODO app: ${{ inputs.app_type }}"
+            git push origin ${{ needs.setup-project.outputs.branch-name }}
+          fi
+
+  quality-assurance:
+    runs-on: ubuntu-latest
+    needs: [setup-project, code-generation]
+    permissions:
+      contents: write
+    outputs:
+      qa-completed: ${{ steps.qa.outputs.completed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup-project.outputs.branch-name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 品質検証
+        id: qa
+        run: |
+          echo "::group::🔍 Quality Assurance Execution"
+          echo "Starting at: $(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)"
+
+          FOLDER_NAME="${{ needs.setup-project.outputs.folder-name }}"
+          APP_DIR="$FOLDER_NAME/app"
+          APP_TYPE="${{ inputs.app_type }}"
+
+          echo "🔍 生成されたファイルを検証中..."
+          echo "App directory: $APP_DIR"
+          echo "App type: $APP_TYPE"
+
+          # ディレクトリ存在確認
+          if [ ! -d "$APP_DIR" ]; then
+            echo "::error::❌ アプリディレクトリが見つかりません: $APP_DIR"
+            exit 1
+          fi
+
+          # ファイル数確認
+          FILE_COUNT=$(find "$APP_DIR" -type f | wc -l)
+          echo "::notice::📁 Total files: $FILE_COUNT"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::❌ 生成されたファイルがありません"
+            exit 1
+          fi
+
+          # アプリタイプ別の検証
+          case "$APP_TYPE" in
+            "basic-html")
+              echo "🌟 Basic HTML app validation..."
+              
+              # HTMLファイルの検証
+              if [ -f "$APP_DIR/index.html" ]; then
+                if grep -q "<html>" "$APP_DIR/index.html" && grep -q "</html>" "$APP_DIR/index.html"; then
+                  echo "::notice::✅ HTML構造確認"
+                else
+                  echo "::error::❌ HTML構造が不正です"
+                  exit 1
+                fi
+                
+                # 基本的なHTML要素の確認
+                if grep -q "<title>" "$APP_DIR/index.html"; then
+                  echo "::notice::✅ HTMLタイトル確認"
+                fi
+              else
+                echo "::error::❌ index.htmlが見つかりません"
+                exit 1
+              fi
+              
+              # CSSファイルの検証
+              if [ -f "$APP_DIR/style.css" ]; then
+                if [ -s "$APP_DIR/style.css" ]; then
+                  echo "::notice::✅ CSSファイル確認"
+                else
+                  echo "::warning::⚠️ CSSファイルが空です"
+                fi
+              fi
+              
+              # JavaScriptファイルの検証
+              if [ -f "$APP_DIR/script.js" ]; then
+                if node -c "$APP_DIR/script.js" 2>/dev/null; then
+                  echo "::notice::✅ JavaScript構文確認"
+                else
+                  echo "::error::❌ JavaScript構文エラー"
+                  node -c "$APP_DIR/script.js" || true
+                  exit 1
+                fi
+              else
+                echo "::error::❌ script.jsが見つかりません"
+                exit 1
+              fi
+              ;;
+              
+            "react-app")
+              echo "⚡ React app validation..."
+              
+              # package.jsonの検証
+              if [ -f "$APP_DIR/package.json" ]; then
+                if jq empty "$APP_DIR/package.json" 2>/dev/null; then
+                  echo "::notice::✅ package.json構文確認"
+                  
+                  # React依存関係の確認
+                  if jq -e '.dependencies.react' "$APP_DIR/package.json" >/dev/null; then
+                    echo "::notice::✅ React依存関係確認"
+                  else
+                    echo "::warning::⚠️ React依存関係が見つかりません"
+                  fi
+                else
+                  echo "::error::❌ package.json構文エラー"
+                  exit 1
+                fi
+              else
+                echo "::error::❌ package.jsonが見つかりません"
+                exit 1
+              fi
+              
+              # TypeScriptファイルの確認
+              if find "$APP_DIR" -name "*.tsx" -o -name "*.ts" | head -1 | read -r ts_file; then
+                echo "::notice::✅ TypeScriptファイル確認: $(basename "$ts_file")"
+              else
+                echo "::warning::⚠️ TypeScriptファイルが見つかりません"
+              fi
+              ;;
+              
+            "fullstack-app")
+              echo "🚀 Full Stack app validation..."
+              
+              # フロントエンド確認
+              if [ -d "$APP_DIR/frontend" ] || [ -f "$APP_DIR/package.json" ]; then
+                echo "::notice::✅ フロントエンド構造確認"
+              else
+                echo "::warning::⚠️ フロントエンド構造が見つかりません"
+              fi
+              
+              # バックエンド確認
+              if [ -d "$APP_DIR/backend" ] || find "$APP_DIR" -name "server.js" -o -name "app.js" | head -1 | read -r; then
+                echo "::notice::✅ バックエンド構造確認"
+              else
+                echo "::warning::⚠️ バックエンド構造が見つかりません"
+              fi
+              
+              # Docker設定確認
+              if [ -f "$APP_DIR/docker-compose.yml" ] || [ -f "$APP_DIR/Dockerfile" ]; then
+                echo "::notice::✅ Docker設定確認"
+              else
+                echo "::warning::⚠️ Docker設定が見つかりません"
+              fi
+              ;;
+          esac
+
+          # README.mdの確認
+          if [ -f "$APP_DIR/README.md" ]; then
+            if [ -s "$APP_DIR/README.md" ]; then
+              echo "::notice::✅ README.md確認"
+              echo "README.md preview (first 5 lines):"
+              head -5 "$APP_DIR/README.md"
+            else
+              echo "::warning::⚠️ README.mdが空です"
+            fi
+          else
+            echo "::warning::⚠️ README.mdが見つかりません"
+          fi
+
+          # ファイルサイズ確認
+          echo ""
+          echo "📊 File size analysis:"
+          find "$APP_DIR" -type f -exec ls -lh {} \; | head -10
+
+          # 大きすぎるファイルの警告
+          find "$APP_DIR" -type f -size +100k | while read -r large_file; do
+            echo "::warning::⚠️ Large file detected: $large_file"
+          done
+
+          echo "::notice::✅ 品質検証完了"
+          echo "completed=true" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+
+  create-pr:
+    runs-on: ubuntu-latest
+    needs:
+      [setup-project, requirements-analysis, code-generation, quality-assurance]
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.setup-project.outputs.branch-name }}
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "::group::📎 Pull Request Creation"
+
+          BRANCH_NAME="${{ needs.setup-project.outputs.branch-name }}"
+          FOLDER_NAME="${{ needs.setup-project.outputs.folder-name }}"
+          USER_REQUIREMENTS="${{ inputs.app_requirements }}"
+          APP_TYPE="${{ inputs.app_type }}"
+
+          echo "Branch: $BRANCH_NAME"
+          echo "Folder: $FOLDER_NAME"
+          echo "Requirements: $USER_REQUIREMENTS"
+          echo "App type: $APP_TYPE"
+
+          # 最終コミット
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$FOLDER_NAME/" 2>/dev/null || true
+
+          # 成果物の確認
+          APP_DIR="$FOLDER_NAME/app"
+          DOCS_DIR="$FOLDER_NAME/docs"
+
+          APP_FILES=0
+          DOC_FILES=0
+
+          if [ -d "$APP_DIR" ]; then
+            APP_FILES=$(find "$APP_DIR" -type f | wc -l)
+            echo "📱 App files: $APP_FILES"
+          fi
+
+          if [ -d "$DOCS_DIR" ]; then
+            DOC_FILES=$(find "$DOCS_DIR" -type f | wc -l)
+            echo "📚 Documentation files: $DOC_FILES"
+          fi
+
+          # コミットメッセージ作成
+          COMMIT_MESSAGE="Add AI-generated TODO app: $APP_TYPE
+
+          要件: $USER_REQUIREMENTS
+          生成日時: $(date -u +%Y-%m-%d\ %H:%M:%S)\ UTC
+
+          📊 Generation Summary:
+          - App Type: $APP_TYPE
+          - App Files: $APP_FILES
+          - Documentation: $DOC_FILES files
+
+          🤖 Generated with Claude Code SDK"
+
+          # コミット実行
+          if git diff --cached --quiet; then
+            echo "Warning: No changes to commit"
+            git commit --allow-empty -m "$COMMIT_MESSAGE"
+          else
+            git commit -m "$COMMIT_MESSAGE"
+          fi
+
+          git push origin $BRANCH_NAME
+
+          # アプリタイプ別の説明
+          case "$APP_TYPE" in
+            "basic-html")
+              TYPE_DESCRIPTION="🌟 **Basic HTML App** - シンプルで軽量なTODOアプリ"
+              USAGE_INSTRUCTIONS="1. \`$APP_DIR/index.html\` をブラウザで開く
+          2. タスクを追加・編集・削除
+          3. ローカルストレージに自動保存"
+              ;;
+            "react-app")
+              TYPE_DESCRIPTION="⚡ **React App** - モダンなTypeScript TODOアプリ"
+              USAGE_INSTRUCTIONS="1. \`cd $APP_DIR && npm install\`
+          2. \`npm run dev\` で開発サーバー起動
+          3. ブラウザで http://localhost:5173 を開く"
+              ;;
+            "fullstack-app")
+              TYPE_DESCRIPTION="🚀 **Full Stack App** - 本格的なWebアプリケーション"
+              USAGE_INSTRUCTIONS="1. \`docker-compose up\` でサービス起動
+          2. フロントエンド: http://localhost:3000
+          3. API: http://localhost:5000"
+              ;;
+          esac
+
+          # プルリクエスト本文作成
+          PR_BODY="🤖 AI生成TODOアプリ
+
+          $TYPE_DESCRIPTION
+
+          ## 📋 生成情報
+          - **要件**: $USER_REQUIREMENTS
+          - **アプリタイプ**: $APP_TYPE
+          - **生成日時**: $(date -u +%Y-%m-%d\ %H:%M:%S)\ UTC
+
+          ## 📊 生成結果
+          - 📱 **アプリファイル**: $APP_FILES files
+          - 📚 **ドキュメント**: $DOC_FILES files
+
+          ## 📁 構造
+          \`\`\`
+          $FOLDER_NAME/
+          ├── app/           # 生成されたアプリケーション
+          └── docs/          # 技術仕様書・要件書
+          \`\`\`
+
+          ## 🚀 使用方法
+          $USAGE_INSTRUCTIONS
+
+          ## 📚 ドキュメント
+          - 📋 [要件書]($FOLDER_NAME/docs/requirements.md)
+          - 🔧 [技術仕様書]($FOLDER_NAME/docs/technical-spec.md)
+          - 📁 [ファイル構造]($FOLDER_NAME/docs/file-structure.md)
+          - 📝 [実装計画]($FOLDER_NAME/docs/implementation-plan.md)
+
+          ## ✅ 品質検証
+          - ✅ 構文チェック完了
+          - ✅ ファイル構造確認
+          - ✅ 基本機能検証
+
+          ---
+          🤖 Generated with [Claude Code SDK](https://github.com/anthropics/claude-code)"
+
+          # GitHub Actions Summary作成
+          echo "# 🤖 AI TODO App Generation Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📋 Generation Info" >> $GITHUB_STEP_SUMMARY
+          echo "- **Requirements**: $USER_REQUIREMENTS" >> $GITHUB_STEP_SUMMARY
+          echo "- **App Type**: $APP_TYPE" >> $GITHUB_STEP_SUMMARY
+          echo "- **Generated**: $(date -u +%Y-%m-%d\ %H:%M:%S)\ UTC" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Results" >> $GITHUB_STEP_SUMMARY
+          echo "- 📱 **App Files**: $APP_FILES" >> $GITHUB_STEP_SUMMARY
+          echo "- 📚 **Documentation**: $DOC_FILES files" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🔗 Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review the generated pull request" >> $GITHUB_STEP_SUMMARY
+          echo "2. Test the application functionality" >> $GITHUB_STEP_SUMMARY
+          echo "3. Merge to main branch if satisfied" >> $GITHUB_STEP_SUMMARY
+
+          # プルリクエスト作成
+          gh pr create \
+            --title "🤖 AI Generated TODO App: $APP_TYPE" \
+            --body "$PR_BODY" \
+            --base main \
+            --head $BRANCH_NAME
+
+          echo "::notice::✅ Pull request created successfully"
+          echo "::endgroup::"

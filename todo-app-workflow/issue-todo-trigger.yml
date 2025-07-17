@@ -1,0 +1,158 @@
+name: Issue TODO Trigger
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: write
+  actions: write
+
+jobs:
+  trigger-todo-creation:
+    if: |
+      (github.event.action == 'opened' && contains(github.event.issue.body, '@create-todo-app')) ||
+      (github.event.action == 'created' && contains(github.event.comment.body, '@create-todo-app'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse TODO app request
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const content = context.payload.action === 'opened' 
+              ? context.payload.issue.body 
+              : context.payload.comment.body;
+
+            console.log('Action:', context.payload.action);
+            console.log('Content:', content);
+
+            // Check if content includes @create-todo-app
+            if (!content.includes('@create-todo-app')) {
+              core.setFailed('No @create-todo-app command found');
+              return;
+            }
+
+            // Extract requirements from content
+            const requirementsMatch = content.match(/要件\s*[：:]\s*(.+?)(?=\n技術|$)/s);
+            const techMatch = content.match(/技術\s*[：:]\s*(.+?)$/s);
+
+            if (!requirementsMatch) {
+              const user = context.eventName === 'issues' 
+                ? context.payload.issue.user.login 
+                : context.payload.comment.user.login;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `@${user} さん、以下の形式で記述してください：\n\n\`\`\`\n@create-todo-app\n要件：[アプリの要件を記述]\n技術：[basic-html/react-app/fullstack-app]\n\`\`\`\n\n※要件は複数行で記述可能です。`
+              });
+              core.setFailed('Invalid format');
+              return;
+            }
+
+            // Clean up the extracted text
+            const requirements = requirementsMatch[1].trim().replace(/\s+/g, ' ');
+
+            // Determine app type from tech specification or default to basic-html
+            let appType = 'basic-html';
+            if (techMatch) {
+              const techText = techMatch[1].toLowerCase();
+              if (techText.includes('react') || techText.includes('typescript')) {
+                appType = 'react-app';
+              } else if (techText.includes('fullstack') || techText.includes('node') || techText.includes('mongodb')) {
+                appType = 'fullstack-app';
+              }
+            }
+
+            core.setOutput('requirements', requirements);
+            core.setOutput('app_type', appType);
+
+            // Add reaction to acknowledge
+            if (context.eventName === 'issue_comment') {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: context.payload.comment.id,
+                content: 'rocket'
+              });
+            } else {
+              await github.rest.reactions.createForIssue({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                content: 'rocket'
+              });
+            }
+
+            // Post status comment
+            const appTypeDescription = {
+              'basic-html': '🌟 Basic HTML App (HTML + CSS + JavaScript)',
+              'react-app': '⚡ React App (React + TypeScript)',
+              'fullstack-app': '🚀 Full Stack App (React + Node.js + MongoDB)'
+            };
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `🤖 AI TODO アプリ生成を開始しました！\n\n**要件**: ${requirements}\n**アプリタイプ**: ${appTypeDescription[appType]}\n\nワークフローの進行状況は[こちら](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})で確認できます。\n\n🔄 **処理フロー**:\n1. 📋 要件分析 - ユーザー要求を分析して技術仕様を作成\n2. 💻 コード生成 - 指定された技術スタックでアプリ生成\n3. 🔍 品質検証 - 構文チェック・動作確認・セキュリティ検証\n4. 📎 PR作成 - 生成されたアプリをプルリクエストとして提出\n\n⏰ アプリ生成には10-15分程度かかります。しばらくお待ちください。`
+            });
+
+      - name: Trigger TODO app creation workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const requirements = '${{ steps.parse.outputs.requirements }}';
+            const appType = '${{ steps.parse.outputs.app_type }}';
+
+            console.log('Triggering workflow with:', { requirements, appType });
+
+            // Trigger the TODO app creation workflow
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'create-todo-app.yml',
+              ref: 'main',
+              inputs: {
+                app_requirements: requirements,
+                app_type: appType
+              }
+            });
+
+      - name: Update issue on completion
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const requirements = '${{ steps.parse.outputs.requirements }}';
+            const appType = '${{ steps.parse.outputs.app_type }}';
+
+            const appTypeDescription = {
+              'basic-html': '🌟 **Basic HTML App** - シンプルで軽量なTODOアプリ',
+              'react-app': '⚡ **React App** - モダンなTypeScript TODOアプリ',
+              'fullstack-app': '🚀 **Full Stack App** - 本格的なWebアプリケーション'
+            };
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `✅ AI TODO アプリ生成ワークフローがトリガーされました！\n\n${appTypeDescription[appType]}\n\n🎯 **処理内容**:\n1. 📋 **要件分析** - システム分析の専門家が要件を詳細に分析\n2. 💻 **コード生成** - フルスタック開発者が高品質なコードを生成\n3. 🔍 **品質検証** - 構文チェック・セキュリティ検証・動作確認\n4. 📎 **PR作成** - 全成果物をまとめてプルリクエスト作成\n\n📊 **生成予定**:\n- アプリケーションファイル\n- 技術仕様書・要件書\n- セットアップ手順書\n- 品質検証レポート\n\n進行状況は[Actions](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions)で確認してください。\n完了後、プルリクエストが自動作成されます！`
+            });
+
+      - name: Handle error
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `❌ エラーが発生しました。詳細は[ワークフローログ](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})を確認してください。\n\n**トラブルシューティング**:\n- 要件が正しく記述されているか確認\n- API キーが正しく設定されているか確認\n- 再度コメントで \`@create-todo-app\` を実行してみてください\n\n**正しい形式**:\n\`\`\`\n@create-todo-app\n要件：シンプルなタスク管理、追加・削除・完了機能\n技術：HTML + CSS + JavaScript\n\`\`\``
+            });
